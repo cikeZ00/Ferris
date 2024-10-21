@@ -1,3 +1,4 @@
+use regex::Regex;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, COOKIE, REFERER, USER_AGENT,
 };
@@ -5,8 +6,9 @@ use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
 use std::fs;
+use strsim::{jaro_winkler, levenshtein};
 
-pub async fn errai(name: &str, season: u8, episode: u16, language: &str) -> Result<()> {
+pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
     // Load cookie from data/config.ini
     let mut cookies = String::new();
 
@@ -27,7 +29,6 @@ pub async fn errai(name: &str, season: u8, episode: u16, language: &str) -> Resu
     }
 
     let client = Client::new();
-
     let mut search_term = jikan_resolve_title(name).await?;
 
     // Set headers
@@ -46,14 +47,32 @@ pub async fn errai(name: &str, season: u8, episode: u16, language: &str) -> Resu
     );
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
 
-    // TODO: Find a better way to handle searching for seasons
-    if season > 1 {
-        search_term.push_str(&format!(" {}", season));
-    }
-
     println!("Searching for: {}", search_term);
 
-    // We hijack the main websites search functionality to get the search results
+    // Generate titles based on the provided episode string (e.g., "2x18"), focusing only on the season
+    let season = extract_season(es);
+    let titles = generate_titles(&search_term, season);
+
+    let sample_list = vec![
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth V",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth IV Part 2",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth IV",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Orion no Ya",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka III",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka II",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka Gaiden: Sword Oratoria",
+        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+    ]; // Example list of strings to compare against
+
+    // Compare the search term with the sample list and return the most similar one
+    for sample in sample_list {
+        for title in &titles {
+            let compared = compare_titles(title, sample);
+            println!("{} | {} | {}", title, sample, compared);
+        }
+    }
+
+    // We hijack the main website's search functionality to get the search results
     let url = format!(
         "https://www.erai-raws.info/?s={}",
         search_term.replace(" ", "+")
@@ -100,6 +119,15 @@ pub async fn errai(name: &str, season: u8, episode: u16, language: &str) -> Resu
     }
 
     Ok(())
+}
+
+// Function to extract the season from the input format (e.g., "2x18")
+fn extract_season(input: &str) -> Option<u32> {
+    let re = Regex::new(r"(\d+)x\d+").unwrap();
+    if let Some(caps) = re.captures(input) {
+        return caps[1].parse::<u32>().ok();
+    }
+    None
 }
 
 // Fetch the sub url from the main website
@@ -169,4 +197,149 @@ async fn jikan_resolve_title(title: &str) -> Result<String> {
     }
 
     Ok(String::new())
+}
+
+fn int_to_roman(num: u32) -> String {
+    let mut result = String::new();
+    let roman_numerals = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+
+    let mut n = num;
+
+    for &(value, symbol) in &roman_numerals {
+        while n >= value {
+            result.push_str(symbol);
+            n -= value;
+        }
+    }
+
+    result
+}
+
+fn ordinal_suffix(num: u32) -> String {
+    match num % 10 {
+        1 if num % 100 != 11 => "st",
+        2 if num % 100 != 12 => "nd",
+        3 if num % 100 != 13 => "rd",
+        _ => "th",
+    }
+    .to_string()
+}
+
+fn generate_titles(base_title: &str, season: Option<u32>) -> Vec<String> {
+    let mut titles = Vec::new();
+
+    if let Some(season) = season {
+        let roman_season = int_to_roman(season); // Convert season to Roman numeral
+        let ordinal = ordinal_suffix(season); // Get the ordinal suffix
+
+        titles.push(format!("{} {} ", base_title, season));
+        titles.push(format!("{} Season {} ", base_title, season));
+        titles.push(format!("{} S{} ", base_title, season));
+        titles.push(format!("{} {}{} Season ", base_title, season, ordinal));
+        titles.push(format!("{} {} ", base_title, roman_season));
+        titles.push(format!("{} Season {} ", base_title, roman_season));
+    }
+
+    titles
+}
+
+// Compare every generated title with every sample title and return the most similar one for each generated title
+fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
+    // Calculate Levenshtein distance between the two titles
+    let lev_distance = levenshtein(generated_title, sample_title);
+
+    // Determine the maximum possible distance based on the length of the longer title
+    let max_len = generated_title.len().max(sample_title.len());
+
+    // If max_len is 0 (both titles are empty), return perfect match score
+    if max_len == 0 {
+        return 1.0;
+    }
+
+    // Calculate base similarity score
+    let similarity_score = 1.0 - (lev_distance as f32 / max_len as f32);
+
+    // Extract season number from the sample title
+    let season_number = extract_season_number(sample_title);
+
+    // Print the extracted season number for debugging
+    println!("Season number: {}", season_number);
+
+    // Create a string representation of the season number
+    let season_str = season_number.to_string();
+    let roman_numeral = to_roman_numeral(season_number);
+
+    // Check for various formats in the generated title
+    let has_correct_number = generated_title.contains(&season_str)
+        || generated_title.contains(&roman_numeral)
+        || generated_title.contains(&format!("Season {}", season_str))
+        || generated_title.contains(&format!("{}th Season", season_str))
+        || generated_title.contains(&format!("S{}", season_str))
+        || generated_title.contains(&format!("{} Season", season_str));
+
+    // Apply a small bonus for matching the correct season number or Roman numeral
+    let bonus = if has_correct_number { 0.2 } else { 0.0 }; // Adjust the bonus weight as needed
+
+    // Penalty for missing the season number or Roman numeral
+    let missing_number_penalty = if !has_correct_number { 0.5 } else { 0.0 }; // Adjust the penalty weight as needed
+
+    // Penalty for missing all characters in the generated title
+    let all_characters_present = sample_title
+        .split_whitespace()
+        .all(|token| generated_title.contains(token));
+    let missing_characters_penalty = if !all_characters_present { 0.3 } else { 0.0 }; // Adjust the penalty weight as needed
+
+    // Introduce a penalty for mismatches based on the length of the titles
+    let penalty = (lev_distance as f32 / max_len as f32) * 0.4; // Penalty weight can be adjusted
+
+    // Final score with bonus and penalties
+    let final_score =
+        (similarity_score + bonus - penalty - missing_characters_penalty - missing_number_penalty)
+            .clamp(0.0, 1.0); // Ensure score is within [0.0, 1.0]
+
+    final_score
+}
+
+fn extract_season_number(title: &str) -> usize {
+    // Regex to match "Season X", "S X", "Xth Season", or just "X"
+    let re = Regex::new(r"(?i)(?:season\s+|s|)(\d+)(?:th)?\s*season?|(\d+)").unwrap();
+
+    if let Some(caps) = re.captures(title) {
+        // Try to parse the first capturing group as a usize
+        if let Some(season_str) = caps.get(1) {
+            return season_str.as_str().parse::<usize>().unwrap_or(0);
+        }
+        // Check the second capturing group if the first doesn't yield a result
+        if let Some(season_str) = caps.get(2) {
+            return season_str.as_str().parse::<usize>().unwrap_or(0);
+        }
+    }
+    // Return 0 if no season number found
+    0
+}
+
+fn to_roman_numeral(num: usize) -> String {
+    match num {
+        1 => "I".to_string(),
+        2 => "II".to_string(),
+        3 => "III".to_string(),
+        4 => "IV".to_string(),
+        5 => "V".to_string(),
+        // Add more as needed
+        _ => "".to_string(),
+    }
 }

@@ -13,9 +13,11 @@ async fn main() {
         std::process::exit(0);
     }
 
-    errai("Re: ZERO, Starting Life in Another World", 2, 1, "French")
-        .await
-        .unwrap();
-
-    println!("Hello, world!");
+    errai(
+        "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+        "5x03",
+        "French",
+    )
+    .await
+    .unwrap();
 }
