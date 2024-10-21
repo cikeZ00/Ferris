@@ -6,9 +6,9 @@ use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
 use std::fs;
-use strsim::{jaro_winkler, levenshtein};
+use strsim::levenshtein;
 
-pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
+pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     // Load cookie from data/config.ini
     let mut cookies = String::new();
 
@@ -29,7 +29,7 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
     }
 
     let client = Client::new();
-    let mut search_term = jikan_resolve_title(name).await?;
+    let search_term = jikan_resolve_title(name).await?;
 
     // Set headers
     let mut headers = HeaderMap::new();
@@ -51,35 +51,8 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
 
     // Generate titles based on the provided episode string (e.g., "2x18"), focusing only on the season
     let season = extract_season(es);
-    let titles = generate_titles(&search_term, season);
+    let guess_titles = generate_titles(&search_term, season);
 
-    let sample_list = vec![
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth V",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth IV Part 2",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Familia Myth IV",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka: Orion no Ya",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka III",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka II",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka Gaiden: Sword Oratoria",
-        "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
-    ]; // Example list of strings to compare against
-
-    // Compare the search term with the sample list and return the most similar one
-    let mut title_score = 0.0;
-    let mut best_title = "";
-
-    // Fetch the subtitle with the highest score
-    for sample in sample_list {
-        for title in &titles {
-            let compared = compare_titles(title, sample);
-            if compared > title_score {
-                title_score = compared;
-                best_title = title;
-            }
-        }
-    }
-
-    println!("Title: {} | Score: {}", best_title, title_score);
 
     // We hijack the main website's search functionality to get the search results
     let url = format!(
@@ -92,6 +65,9 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
         let body = res.text().await?;
         let document = Document::from(body.as_str());
 
+        let mut series_titles_list = Vec::new();
+        let mut title_pages = Vec::new();
+
         // Find articles by parsing the <article> tag and extracting <h2> and <a>
         for article in document.find(Name("article")) {
             let title = article.find(Name("h2")).next().and_then(|h2| {
@@ -101,28 +77,43 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
             });
 
             if let Some((article_title, article_link)) = title {
-                println!("Title: {} | Link: {}", article_title, article_link);
+                // Push the title to the list
+                series_titles_list.push(article_title.clone());
 
-                let sub_dir = match fetch_sub_url(&client, &article_link, &headers).await {
-                    Ok(url) => url,
-                    Err(e) => {
-                        println!("Failed to fetch article details: {}", e);
-                        continue;
-                    }
-                };
+                // push title with link to title_pages
+                title_pages.push((article_title.clone(), article_link.clone()));
 
-                // Fetch subtitles
-                let subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
-                    Ok(sub) => sub,
-                    Err(e) => {
-                        println!("Failed to fetch subtitles: {}", e);
-                        continue;
-                    }
-                };
-
-                println!("Subtitle: {}", subtitle);
             }
         }
+
+        let find_result = find_best_match(series_titles_list.iter().map(|s| s.as_str()).collect(), guess_titles.iter().map(|s| s.as_str()).collect()).unwrap();
+        println!("Best Match: {}", find_result);
+
+        // Fetch the subtitle dir page of best match from title_pages
+        let best_match_url = title_pages.iter().find(|(title, _)| title == find_result);
+
+        if let Some((_, link)) = best_match_url {
+            let sub_dir = match fetch_sub_url(&client, link, &headers).await {
+                Ok(url) => url,
+                Err(e) => {
+                    println!("Failed to fetch article details: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Fetch subtitles
+            let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    println!("Failed to fetch subtitles: {}", e);
+                    return Ok(());
+                }
+            };
+
+        }
+
+
+
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
     }
@@ -255,20 +246,23 @@ fn generate_titles(base_title: &str, season: Option<u32>) -> Vec<String> {
         let roman_season = int_to_roman(season); // Convert season to Roman numeral
         let ordinal = ordinal_suffix(season); // Get the ordinal suffix
 
-        titles.push(format!("{} {} ", base_title, season));
-        titles.push(format!("{} Season {} ", base_title, season));
-        titles.push(format!("{} S{} ", base_title, season));
-        titles.push(format!("{} {}{} Season ", base_title, season, ordinal));
-        titles.push(format!("{} {} ", base_title, roman_season));
-        titles.push(format!("{} Season {} ", base_title, roman_season));
+        if season > 1 {
+            titles.push(format!("{} {}", base_title, season));
+            titles.push(format!("{} Season {}", base_title, season));
+            titles.push(format!("{} S{}", base_title, season));
+            titles.push(format!("{} {}{} Season", base_title, season, ordinal));
+            titles.push(format!("{} {}", base_title, roman_season));
+            titles.push(format!("{} Season {}", base_title, roman_season));
+        } else {
+            // Edge case for season 1
+            titles.push(base_title.to_string());
+        }
     }
 
     titles
 }
 
-// Compare every generated title with every sample title and return the most similar one for each generated title
 fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
-    // Calculate base similarity using Levenshtein distance
     let lev_distance = levenshtein(generated_title, sample_title);
     let max_len = generated_title.len().max(sample_title.len());
 
@@ -278,7 +272,6 @@ fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
 
     let similarity_score = 1.0 - (lev_distance as f32 / max_len as f32);
 
-    // Helper function to check if a token is a valid Roman numeral
     fn is_roman_numeral(s: &str) -> bool {
         matches!(
             s.to_uppercase().as_str(),
@@ -317,4 +310,24 @@ fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
 
     // Final score with bonuses and penalties
     (similarity_score + bonus - missing_number_penalty - missing_characters_penalty).clamp(0.0, 1.0)
+}
+
+fn find_best_match<'a>(titles: Vec<&'a str>, title_list: Vec<&'a str>) -> Option<&'a str> {
+    // Compare the search term with the sample list and return the most similar one
+    let mut title_score = 0.0;
+    let mut best_title = "";
+
+    // Fetch the subtitle with the highest score
+    for sample in title_list {
+        for title in &titles {
+            let compared = compare_titles(title, sample);
+            if compared > title_score {
+                title_score = compared;
+                best_title = title;
+            }
+        }
+    }
+
+    println!("Title: {} | Score: {}", best_title, title_score);
+    Some(best_title)
 }

@@ -14,10 +14,11 @@ async fn main() {
     }
 
     errai(
-        "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
-        "4x03",
-        "French",
+        "Blue Exorcist",
+        "2x03",
+        "",
     )
     .await
     .unwrap();
+
 }
