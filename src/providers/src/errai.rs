@@ -65,12 +65,21 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
     ]; // Example list of strings to compare against
 
     // Compare the search term with the sample list and return the most similar one
+    let mut title_score = 0.0;
+    let mut best_title = "";
+
+    // Fetch the subtitle with the highest score
     for sample in sample_list {
         for title in &titles {
             let compared = compare_titles(title, sample);
-            println!("{} | {} | {}", title, sample, compared);
+            if compared > title_score {
+                title_score = compared;
+                best_title = title;
+            }
         }
     }
+
+    println!("Title: {} | Score: {}", best_title, title_score);
 
     // We hijack the main website's search functionality to get the search results
     let url = format!(
@@ -259,87 +268,53 @@ fn generate_titles(base_title: &str, season: Option<u32>) -> Vec<String> {
 
 // Compare every generated title with every sample title and return the most similar one for each generated title
 fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
-    // Calculate Levenshtein distance between the two titles
+    // Calculate base similarity using Levenshtein distance
     let lev_distance = levenshtein(generated_title, sample_title);
-
-    // Determine the maximum possible distance based on the length of the longer title
     let max_len = generated_title.len().max(sample_title.len());
 
-    // If max_len is 0 (both titles are empty), return perfect match score
     if max_len == 0 {
-        return 1.0;
+        return 1.0; // Perfect match if both are empty
     }
 
-    // Calculate base similarity score
     let similarity_score = 1.0 - (lev_distance as f32 / max_len as f32);
 
-    // Extract season number from the sample title
-    let season_number = extract_season_number(sample_title);
+    // Helper function to check if a token is a valid Roman numeral
+    fn is_roman_numeral(s: &str) -> bool {
+        matches!(
+            s.to_uppercase().as_str(),
+            "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X"
+        )
+    }
 
-    // Print the extracted season number for debugging
-    println!("Season number: {}", season_number);
+    // Extract possible season number from sample title (either digits or Roman numerals)
+    let season_number = sample_title
+        .split_whitespace()
+        .find(|token| token.chars().all(|c| c.is_digit(10)) || is_roman_numeral(token));
 
-    // Create a string representation of the season number
-    let season_str = season_number.to_string();
-    let roman_numeral = to_roman_numeral(season_number);
+    let has_correct_number = if let Some(season_str) = season_number {
+        [
+            season_str,
+            &format!("Season {}", season_str),
+            &format!("{}th Season", season_str),
+            &format!("S{}", season_str),
+            &format!("{} Season", season_str),
+        ]
+        .iter()
+        .any(|format| generated_title.contains(format))
+    } else {
+        false
+    };
 
-    // Check for various formats in the generated title
-    let has_correct_number = generated_title.contains(&season_str)
-        || generated_title.contains(&roman_numeral)
-        || generated_title.contains(&format!("Season {}", season_str))
-        || generated_title.contains(&format!("{}th Season", season_str))
-        || generated_title.contains(&format!("S{}", season_str))
-        || generated_title.contains(&format!("{} Season", season_str));
+    // Apply bonus for season number match
+    let bonus = if has_correct_number { 0.2 } else { 0.0 };
 
-    // Apply a small bonus for matching the correct season number or Roman numeral
-    let bonus = if has_correct_number { 0.2 } else { 0.0 }; // Adjust the bonus weight as needed
-
-    // Penalty for missing the season number or Roman numeral
-    let missing_number_penalty = if !has_correct_number { 0.5 } else { 0.0 }; // Adjust the penalty weight as needed
-
-    // Penalty for missing all characters in the generated title
+    // Penalties for missing season number or characters
+    let missing_number_penalty = if !has_correct_number { 0.5 } else { 0.0 };
     let all_characters_present = sample_title
         .split_whitespace()
-        .all(|token| generated_title.contains(token));
-    let missing_characters_penalty = if !all_characters_present { 0.3 } else { 0.0 }; // Adjust the penalty weight as needed
+        .all(|word| generated_title.contains(word));
+    let missing_characters_penalty = if !all_characters_present { 0.3 } else { 0.0 };
 
-    // Introduce a penalty for mismatches based on the length of the titles
-    let penalty = (lev_distance as f32 / max_len as f32) * 0.4; // Penalty weight can be adjusted
-
-    // Final score with bonus and penalties
-    let final_score =
-        (similarity_score + bonus - penalty - missing_characters_penalty - missing_number_penalty)
-            .clamp(0.0, 1.0); // Ensure score is within [0.0, 1.0]
-
-    final_score
-}
-
-fn extract_season_number(title: &str) -> usize {
-    // Regex to match "Season X", "S X", "Xth Season", or just "X"
-    let re = Regex::new(r"(?i)(?:season\s+|s|)(\d+)(?:th)?\s*season?|(\d+)").unwrap();
-
-    if let Some(caps) = re.captures(title) {
-        // Try to parse the first capturing group as a usize
-        if let Some(season_str) = caps.get(1) {
-            return season_str.as_str().parse::<usize>().unwrap_or(0);
-        }
-        // Check the second capturing group if the first doesn't yield a result
-        if let Some(season_str) = caps.get(2) {
-            return season_str.as_str().parse::<usize>().unwrap_or(0);
-        }
-    }
-    // Return 0 if no season number found
-    0
-}
-
-fn to_roman_numeral(num: usize) -> String {
-    match num {
-        1 => "I".to_string(),
-        2 => "II".to_string(),
-        3 => "III".to_string(),
-        4 => "IV".to_string(),
-        5 => "V".to_string(),
-        // Add more as needed
-        _ => "".to_string(),
-    }
+    // Final score with bonuses and penalties
+    (similarity_score + bonus - missing_number_penalty - missing_characters_penalty).clamp(0.0, 1.0)
 }
