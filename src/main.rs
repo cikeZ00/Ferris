@@ -13,12 +13,5 @@ async fn main() {
         std::process::exit(0);
     }
 
-    errai(
-        "Blue Exorcist",
-        "2x03",
-        "",
-    )
-    .await
-    .unwrap();
-
+    errai("Blue Exorcist", "1x03", "").await.unwrap();
 }

@@ -8,9 +8,12 @@ use select::predicate::{Attr, Name};
 use std::fs;
 use strsim::levenshtein;
 
+// Jikan related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
 pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     // Load cookie from data/config.ini
     let mut cookies = String::new();
+
+    jikan_fetch_related(9919).await?;
 
     if let Ok(cookie_data) = fs::read_to_string("data/config.ini") {
         for line in cookie_data
@@ -53,7 +56,6 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     let season = extract_season(es);
     let guess_titles = generate_titles(&search_term, season);
 
-
     // We hijack the main website's search functionality to get the search results
     let url = format!(
         "https://www.erai-raws.info/?s={}",
@@ -82,11 +84,14 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
 
                 // push title with link to title_pages
                 title_pages.push((article_title.clone(), article_link.clone()));
-
             }
         }
 
-        let find_result = find_best_match(series_titles_list.iter().map(|s| s.as_str()).collect(), guess_titles.iter().map(|s| s.as_str()).collect()).unwrap();
+        let find_result = find_best_match(
+            series_titles_list.iter().map(|s| s.as_str()).collect(),
+            guess_titles.iter().map(|s| s.as_str()).collect(),
+        )
+        .unwrap();
         println!("Best Match: {}", find_result);
 
         // Fetch the subtitle dir page of best match from title_pages
@@ -109,11 +114,7 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
                     return Ok(());
                 }
             };
-
         }
-
-
-
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
     }
@@ -188,9 +189,32 @@ async fn jikan_resolve_title(title: &str) -> Result<String> {
         let body = res.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
+        let id = json["data"][0]["mal_id"].clone();
+        println!("Fetched ID: {}", id);
+
         if let Some(anime) = json["data"][0]["title"].as_str() {
             println!("Romaji: {}", anime);
             return Ok(anime.to_string());
+        }
+    } else {
+        println!("Failed to fetch anime details. Status: {}", res.status());
+    }
+
+    Ok(String::new())
+}
+
+async fn jikan_fetch_related(mal_id: i16) -> Result<String> {
+    let url = format!("https://api.jikan.moe/v4/anime/{}/relations", mal_id);
+    let res = reqwest::get(&url).await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+
+        println!("Returned Data: {:?}", json.clone());
+        let j_data = json["Data"].clone();
+        for related in j_data.as_array() {
+            println!("Related {:?}", related);
         }
     } else {
         println!("Failed to fetch anime details. Status: {}", res.status());
