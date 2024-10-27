@@ -6,14 +6,13 @@ use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
 use std::fs;
-use strsim::levenshtein;
 
 // Jikan related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
 pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     // Load cookie from data/config.ini
     let mut cookies = String::new();
 
-    jikan_fetch_related(9919).await?;
+    jikan_fetch_related_sequel(9919).await?;
 
     if let Ok(cookie_data) = fs::read_to_string("data/config.ini") {
         for line in cookie_data
@@ -32,7 +31,7 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     }
 
     let client = Client::new();
-    let search_term = jikan_resolve_title(name).await?;
+    let search_term = jikan_fetch_anime(name, es).await?;
 
     // Set headers
     let mut headers = HeaderMap::new();
@@ -51,10 +50,6 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
 
     println!("Searching for: {}", search_term);
-
-    // Generate titles based on the provided episode string (e.g., "2x18"), focusing only on the season
-    let season = extract_season(es);
-    let guess_titles = generate_titles(&search_term, season);
 
     // We hijack the main website's search functionality to get the search results
     let url = format!(
@@ -87,34 +82,23 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
             }
         }
 
-        let find_result = find_best_match(
-            series_titles_list.iter().map(|s| s.as_str()).collect(),
-            guess_titles.iter().map(|s| s.as_str()).collect(),
-        )
-        .unwrap();
-        println!("Best Match: {}", find_result);
+        let link = "TODO";
+        let sub_dir = match fetch_sub_url(&client, link, &headers).await {
+            Ok(url) => url,
+            Err(e) => {
+                println!("Failed to fetch article details: {}", e);
+                return Ok(());
+            }
+        };
 
-        // Fetch the subtitle dir page of best match from title_pages
-        let best_match_url = title_pages.iter().find(|(title, _)| title == find_result);
-
-        if let Some((_, link)) = best_match_url {
-            let sub_dir = match fetch_sub_url(&client, link, &headers).await {
-                Ok(url) => url,
-                Err(e) => {
-                    println!("Failed to fetch article details: {}", e);
-                    return Ok(());
-                }
-            };
-
-            // Fetch subtitles
-            let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
-                Ok(sub) => sub,
-                Err(e) => {
-                    println!("Failed to fetch subtitles: {}", e);
-                    return Ok(());
-                }
-            };
-        }
+        // Fetch subtitles
+        let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                println!("Failed to fetch subtitles: {}", e);
+                return Ok(());
+            }
+        };
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
     }
@@ -123,10 +107,12 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
 }
 
 // Function to extract the season from the input format (e.g., "2x18")
-fn extract_season(input: &str) -> Option<u32> {
-    let re = Regex::new(r"(\d+)x\d+").unwrap();
+fn extract_season_episode(input: &str) -> Option<(u32, u32)> {
+    let re = Regex::new(r"(\d+)x(\d+)").unwrap();
     if let Some(caps) = re.captures(input) {
-        return caps[1].parse::<u32>().ok();
+        let season = caps[1].parse::<u32>().ok()?;
+        let episode = caps[2].parse::<u32>().ok()?;
+        return Some((season, episode));
     }
     None
 }
@@ -181,7 +167,7 @@ async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Resu
     Ok(String::new())
 }
 
-async fn jikan_resolve_title(title: &str) -> Result<String> {
+async fn jikan_fetch_anime(title: &str, es: &str) -> Result<String> {
     let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=3", title);
     let res = reqwest::get(&url).await?;
 
@@ -189,13 +175,36 @@ async fn jikan_resolve_title(title: &str) -> Result<String> {
         let body = res.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
+        let mut current_season = 1;
+        let mut current_episodes: i32;
+
         let id = json["data"][0]["mal_id"].clone();
         println!("Fetched ID: {}", id);
 
-        if let Some(anime) = json["data"][0]["title"].as_str() {
-            println!("Romaji: {}", anime);
-            return Ok(anime.to_string());
+        // Separate season and episode from input
+        if let Some((season, episode_count)) = extract_season_episode(es) {
+            let episodes = json["data"][0]["episodes"].clone();
+            println!("Wanted Season: {}", season);
+            println!("Wanted Episode: {}", episodes);
+
+            // -----------------------------------------------------------------------------------------------FIX THIS------------------------------------------------------------------------------------------
+
+            if episode_count > episodes.as_i64().unwrap() as u32 {
+                current_season += 1;
+
+                let seq = jikan_fetch_related_sequel(id.as_i64().unwrap());
+                println!("Idk: {:?}", seq.await);
+            }
+        } else {
+            println!("Failed to parse season and episode.");
         }
+
+        // if let Some(anime) = json["data"][0]["title"].as_str() {
+        // println!("Romaji: {}", anime);
+        // return Ok(anime.to_string());
+        // }
+
+        //println!("Anime: {:?}", json.to_string());
     } else {
         println!("Failed to fetch anime details. Status: {}", res.status());
     }
@@ -203,7 +212,7 @@ async fn jikan_resolve_title(title: &str) -> Result<String> {
     Ok(String::new())
 }
 
-async fn jikan_fetch_related(mal_id: i16) -> Result<String> {
+async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<String> {
     let url = format!("https://api.jikan.moe/v4/anime/{}/relations", mal_id);
     let res = reqwest::get(&url).await?;
 
@@ -211,147 +220,28 @@ async fn jikan_fetch_related(mal_id: i16) -> Result<String> {
         let body = res.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
-        println!("Returned Data: {:?}", json.clone());
-        let j_data = json["Data"].clone();
-        for related in j_data.as_array() {
-            println!("Related {:?}", related);
+        if let Some(relations) = json["data"].as_array() {
+            for relation in relations {
+                //println!("Relation: {:?}", relation);
+
+                // TODO: Check for type to ensure its anime
+
+                if let Some("Sequel") = relation.get("relation").and_then(|r| r.as_str()) {
+                    if let Some(entries) = relation.get("entry").and_then(|e| e.as_array()) {
+                        if let Some(mal_id) = entries
+                            .get(0)
+                            .and_then(|entry| entry.get("mal_id"))
+                            .and_then(|id| id.as_i64())
+                        {
+                            println!("Entry_id: {:?}", mal_id);
+                        }
+                    }
+                }
+            }
         }
     } else {
         println!("Failed to fetch anime details. Status: {}", res.status());
     }
 
     Ok(String::new())
-}
-
-fn int_to_roman(num: u32) -> String {
-    let mut result = String::new();
-    let roman_numerals = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-
-    let mut n = num;
-
-    for &(value, symbol) in &roman_numerals {
-        while n >= value {
-            result.push_str(symbol);
-            n -= value;
-        }
-    }
-
-    result
-}
-
-fn ordinal_suffix(num: u32) -> String {
-    match num % 10 {
-        1 if num % 100 != 11 => "st",
-        2 if num % 100 != 12 => "nd",
-        3 if num % 100 != 13 => "rd",
-        _ => "th",
-    }
-    .to_string()
-}
-
-fn generate_titles(base_title: &str, season: Option<u32>) -> Vec<String> {
-    let mut titles = Vec::new();
-
-    if let Some(season) = season {
-        let roman_season = int_to_roman(season); // Convert season to Roman numeral
-        let ordinal = ordinal_suffix(season); // Get the ordinal suffix
-
-        if season > 1 {
-            titles.push(format!("{} {}", base_title, season));
-            titles.push(format!("{} Season {}", base_title, season));
-            titles.push(format!("{} S{}", base_title, season));
-            titles.push(format!("{} {}{} Season", base_title, season, ordinal));
-            titles.push(format!("{} {}", base_title, roman_season));
-            titles.push(format!("{} Season {}", base_title, roman_season));
-        } else {
-            // Edge case for season 1
-            titles.push(base_title.to_string());
-        }
-    }
-
-    titles
-}
-
-fn compare_titles(generated_title: &str, sample_title: &str) -> f32 {
-    let lev_distance = levenshtein(generated_title, sample_title);
-    let max_len = generated_title.len().max(sample_title.len());
-
-    if max_len == 0 {
-        return 1.0; // Perfect match if both are empty
-    }
-
-    let similarity_score = 1.0 - (lev_distance as f32 / max_len as f32);
-
-    fn is_roman_numeral(s: &str) -> bool {
-        matches!(
-            s.to_uppercase().as_str(),
-            "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X"
-        )
-    }
-
-    // Extract possible season number from sample title (either digits or Roman numerals)
-    let season_number = sample_title
-        .split_whitespace()
-        .find(|token| token.chars().all(|c| c.is_digit(10)) || is_roman_numeral(token));
-
-    let has_correct_number = if let Some(season_str) = season_number {
-        [
-            season_str,
-            &format!("Season {}", season_str),
-            &format!("{}th Season", season_str),
-            &format!("S{}", season_str),
-            &format!("{} Season", season_str),
-        ]
-        .iter()
-        .any(|format| generated_title.contains(format))
-    } else {
-        false
-    };
-
-    // Apply bonus for season number match
-    let bonus = if has_correct_number { 0.2 } else { 0.0 };
-
-    // Penalties for missing season number or characters
-    let missing_number_penalty = if !has_correct_number { 0.5 } else { 0.0 };
-    let all_characters_present = sample_title
-        .split_whitespace()
-        .all(|word| generated_title.contains(word));
-    let missing_characters_penalty = if !all_characters_present { 0.3 } else { 0.0 };
-
-    // Final score with bonuses and penalties
-    (similarity_score + bonus - missing_number_penalty - missing_characters_penalty).clamp(0.0, 1.0)
-}
-
-fn find_best_match<'a>(titles: Vec<&'a str>, title_list: Vec<&'a str>) -> Option<&'a str> {
-    // Compare the search term with the sample list and return the most similar one
-    let mut title_score = 0.0;
-    let mut best_title = "";
-
-    // Fetch the subtitle with the highest score
-    for sample in title_list {
-        for title in &titles {
-            let compared = compare_titles(title, sample);
-            if compared > title_score {
-                title_score = compared;
-                best_title = title;
-            }
-        }
-    }
-
-    println!("Title: {} | Score: {}", best_title, title_score);
-    Some(best_title)
 }
