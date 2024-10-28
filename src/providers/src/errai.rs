@@ -5,14 +5,22 @@ use reqwest::header::{
 use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
+
+#[derive(Debug)]
+struct Season<'a> {
+    title: &'a str,
+    id: i32,
+    season: i32,
+    episodes: i32,
+}
 
 // Jikan related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
 pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     // Load cookie from data/config.ini
     let mut cookies = String::new();
-
-    jikan_fetch_related_sequel(9919).await?;
 
     if let Ok(cookie_data) = fs::read_to_string("data/config.ini") {
         for line in cookie_data
@@ -167,6 +175,7 @@ async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Resu
     Ok(String::new())
 }
 
+// Main function for fetching the correct series and episode
 async fn jikan_fetch_anime(title: &str, es: &str) -> Result<String> {
     let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=3", title);
     let res = reqwest::get(&url).await?;
@@ -175,34 +184,21 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<String> {
         let body = res.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
-        let mut current_season = 1;
-        let mut current_episodes: i32;
-
         let id = json["data"][0]["mal_id"].clone();
+        let name = json["data"][0]["title"].as_str().clone().unwrap();
         println!("Fetched ID: {}", id);
 
         // Separate season and episode from input
-        if let Some((season, episode_count)) = extract_season_episode(es) {
+        if let Some((wanted_season, wanted_episode)) = extract_season_episode(es) {
             let episodes = json["data"][0]["episodes"].clone();
-            println!("Wanted Season: {}", season);
-            println!("Wanted Episode: {}", episodes);
+            println!("Wanted Season: {}", wanted_season);
+            println!("Fetched Episode: {}", episodes);
 
             // -----------------------------------------------------------------------------------------------FIX THIS------------------------------------------------------------------------------------------
-
-            if episode_count > episodes.as_i64().unwrap() as u32 {
-                current_season += 1;
-
-                let seq = jikan_fetch_related_sequel(id.as_i64().unwrap());
-                println!("Idk: {:?}", seq.await);
-            }
+            build_full_series(name, id, wanted_season, episodes, wanted_episode).await;
         } else {
             println!("Failed to parse season and episode.");
         }
-
-        // if let Some(anime) = json["data"][0]["title"].as_str() {
-        // println!("Romaji: {}", anime);
-        // return Ok(anime.to_string());
-        // }
 
         //println!("Anime: {:?}", json.to_string());
     } else {
@@ -212,7 +208,60 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<String> {
     Ok(String::new())
 }
 
-async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<String> {
+// Fetch series from id
+// TODO: Finish this function
+async fn jikan_fetch_from_id(id: i32) -> Result<String> {
+    let url = format!("https://api.jikan.moe/v4/anime/{}", id);
+    let res = reqwest::get(&url).await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+    }
+
+    Ok("Some placeholder".to_string())
+}
+
+fn build_season(title: &str, mal_id: i32, season: i32, episodes: i32) -> Season {
+    Season {
+        title: title,
+        id: mal_id,
+        season: season,
+        episodes: episodes,
+    }
+}
+
+async fn build_full_series(
+    name: &str,
+    id: Value,
+    season: u32,
+    episodes: Value,
+    episode_count: u32,
+) {
+    let mut series_full = Vec::new();
+    let mut current_season = 1;
+
+    // Build a single season
+    let built_season = build_season(
+        name,
+        id.as_i64().unwrap() as i32,
+        current_season,
+        episodes.as_i64().unwrap() as i32,
+    );
+
+    // Identify series parts
+    if season == current_season as u32 && episode_count > episodes.as_i64().unwrap() as u32 {
+        let related_id = jikan_fetch_related_sequel(id.as_i64().unwrap());
+        println!("Idk: {:?}", related_id.await);
+
+        // Fetch sequel
+    }
+
+    series_full.push(built_season);
+    println!("S_Array: {:?}", series_full.get(0));
+}
+
+async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<i64> {
     let url = format!("https://api.jikan.moe/v4/anime/{}/relations", mal_id);
     let res = reqwest::get(&url).await?;
 
@@ -234,6 +283,7 @@ async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<String> {
                             .and_then(|id| id.as_i64())
                         {
                             println!("Entry_id: {:?}", mal_id);
+                            return Ok(mal_id);
                         }
                     }
                 }
@@ -243,5 +293,5 @@ async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<String> {
         println!("Failed to fetch anime details. Status: {}", res.status());
     }
 
-    Ok(String::new())
+    Ok(0)
 }
