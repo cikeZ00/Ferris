@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use regex::Regex;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, COOKIE, REFERER, USER_AGENT,
@@ -6,20 +7,19 @@ use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs;
+use tokio::time::{sleep, Duration};
 
 #[derive(Debug)]
-struct Season<'a> {
-    title: &'a str,
+struct Season {
+    title: String, // Change to String to own the title data
     id: i32,
     season: i32,
     episodes: i32,
 }
 
-// Jikan related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
+// Jikan-related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
 pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
-    // Load cookie from data/config.ini
     let mut cookies = String::new();
 
     if let Ok(cookie_data) = fs::read_to_string("data/config.ini") {
@@ -39,30 +39,26 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     }
 
     let client = Client::new();
-    let search_term = jikan_fetch_anime(name, es).await?;
+    let anime = jikan_fetch_anime(name, es).await?;
 
-    // Set headers
     let mut headers = HeaderMap::new();
     headers.insert(COOKIE, HeaderValue::from_str(&cookies).unwrap());
-    headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.121 Safari/537.36"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0"));
     headers.insert(
         REFERER,
         HeaderValue::from_static("https://www.erai-raws.info/"),
     );
     headers.insert(
         ACCEPT,
-        HeaderValue::from_static(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        ),
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml"),
     );
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
 
-    println!("Searching for: {}", search_term);
+    println!("Searching for: {}", anime.0.clone());
 
-    // We hijack the main website's search functionality to get the search results
     let url = format!(
         "https://www.erai-raws.info/?s={}",
-        search_term.replace(" ", "+")
+        anime.0.replace(" ", "+")
     );
     let res = client.get(&url).headers(headers.clone()).send().await?;
 
@@ -73,7 +69,6 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
         let mut series_titles_list = Vec::new();
         let mut title_pages = Vec::new();
 
-        // Find articles by parsing the <article> tag and extracting <h2> and <a>
         for article in document.find(Name("article")) {
             let title = article.find(Name("h2")).next().and_then(|h2| {
                 h2.find(Name("a"))
@@ -82,31 +77,33 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
             });
 
             if let Some((article_title, article_link)) = title {
-                // Push the title to the list
                 series_titles_list.push(article_title.clone());
-
-                // push title with link to title_pages
                 title_pages.push((article_title.clone(), article_link.clone()));
             }
         }
 
-        let link = "TODO";
-        let sub_dir = match fetch_sub_url(&client, link, &headers).await {
-            Ok(url) => url,
-            Err(e) => {
-                println!("Failed to fetch article details: {}", e);
-                return Ok(());
-            }
-        };
+        let link = title_pages
+            .iter()
+            .find(|(title, _)| title.to_string() == anime.0.clone());
 
-        // Fetch subtitles
-        let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
-            Ok(sub) => sub,
-            Err(e) => {
-                println!("Failed to fetch subtitles: {}", e);
-                return Ok(());
-            }
-        };
+        if let Some((_, link)) = link {
+            let sub_dir = match fetch_sub_url(&client, link, &headers).await {
+                Ok(url) => url,
+                Err(e) => {
+                    println!("Failed to fetch article details: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Fetch subtitles
+            let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    println!("Failed to fetch subtitles: {}", e);
+                    return Ok(());
+                }
+            };
+        }
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
     }
@@ -114,7 +111,6 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     Ok(())
 }
 
-// Function to extract the season from the input format (e.g., "2x18")
 fn extract_season_episode(input: &str) -> Option<(u32, u32)> {
     let re = Regex::new(r"(\d+)x(\d+)").unwrap();
     if let Some(caps) = re.captures(input) {
@@ -125,7 +121,6 @@ fn extract_season_episode(input: &str) -> Option<(u32, u32)> {
     None
 }
 
-// Fetch the sub url from the main website
 async fn fetch_sub_url(client: &Client, url: &str, headers: &HeaderMap) -> Result<String> {
     let res = client.get(url).headers(headers.clone()).send().await?;
 
@@ -151,7 +146,6 @@ async fn fetch_sub_url(client: &Client, url: &str, headers: &HeaderMap) -> Resul
     Ok(String::new())
 }
 
-// Fetch the actual subtitles from the subs directory page
 async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Result<String> {
     let res = client.get(url).headers(headers.clone()).send().await?;
 
@@ -175,123 +169,199 @@ async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Resu
     Ok(String::new())
 }
 
-// Main function for fetching the correct series and episode
-async fn jikan_fetch_anime(title: &str, es: &str) -> Result<String> {
+async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
     let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=3", title);
     let res = reqwest::get(&url).await?;
 
     if res.status().is_success() {
         let body = res.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+        let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
         let id = json["data"][0]["mal_id"].clone();
-        let name = json["data"][0]["title"].as_str().clone().unwrap();
         println!("Fetched ID: {}", id);
 
-        // Separate season and episode from input
         if let Some((wanted_season, wanted_episode)) = extract_season_episode(es) {
-            let episodes = json["data"][0]["episodes"].clone();
             println!("Wanted Season: {}", wanted_season);
-            println!("Fetched Episode: {}", episodes);
+            println!("Wanted Episode: {}", wanted_episode);
 
-            // -----------------------------------------------------------------------------------------------FIX THIS------------------------------------------------------------------------------------------
-            build_full_series(name, id, wanted_season, episodes, wanted_episode).await;
+            // Here we build the Series object that includes all of the seasons of the show
+            let series = build_full_series(id.as_i64().unwrap() as i32).await?;
+
+            // Use merge_seasons to merge parts of the seasons
+            let merged_series = merge_seasons(series);
+
+            println!("Full series: {:?}", merged_series);
+
+            // Find the desired season in the merged series
+            if let Some(season) = merged_series
+                .iter()
+                .find(|season| season.season == wanted_season as i32)
+            {
+                println!("Found season: {:?}", season);
+
+                let mut remaining_episodes = wanted_episode;
+
+                // Check if season is split into parts
+                if remaining_episodes > season.episodes as u32 {
+                    let next_season = merged_series
+                        .iter()
+                        .find(|next_season| next_season.season == season.season + 1);
+
+                    if let Some(next_season) = next_season {
+                        // Decrease remaining_episodes by the current season's episodes
+                        remaining_episodes -= season.episodes as u32;
+                        println!("Fetching next season: {:?}", next_season);
+                        println!("Remaining episodes to find: {}", remaining_episodes);
+
+                        if remaining_episodes <= next_season.episodes as u32 {
+                            // Return the part 2's title and episode remainder
+                            println!("In {}: Episode {}", next_season.title, remaining_episodes);
+                            let episode_info: (String, u32) =
+                                (next_season.title.clone(), remaining_episodes);
+                            return Ok(episode_info);
+                        } else {
+                            println!(
+                                "Not enough episodes in next season. Total episodes: {}",
+                                next_season.episodes
+                            );
+                        }
+                    } else {
+                        println!("No next season found after season {}", season.season);
+                    }
+                } else {
+                    // This season is not split into parts
+                    let episode_info: (String, u32) = (season.title.clone(), remaining_episodes);
+                    println!("In {}: Episode {}", season.title, remaining_episodes);
+                    return Ok(episode_info);
+                }
+            } else {
+                println!("Season {} not found", wanted_season);
+            }
         } else {
             println!("Failed to parse season and episode.");
         }
-
-        //println!("Anime: {:?}", json.to_string());
     } else {
         println!("Failed to fetch anime details. Status: {}", res.status());
     }
 
-    Ok(String::new())
+    // Temporary until we implement custom Errors
+    Ok(("None".to_string(), 0))
 }
 
-// Fetch series from id
-// TODO: Finish this function
-async fn jikan_fetch_from_id(id: i32) -> Result<String> {
-    let url = format!("https://api.jikan.moe/v4/anime/{}", id);
-    let res = reqwest::get(&url).await?;
-
-    if res.status().is_success() {
-        let body = res.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
-    }
-
-    Ok("Some placeholder".to_string())
-}
-
-fn build_season(title: &str, mal_id: i32, season: i32, episodes: i32) -> Season {
-    Season {
-        title: title,
-        id: mal_id,
-        season: season,
-        episodes: episodes,
-    }
-}
-
-async fn build_full_series(
-    name: &str,
-    id: Value,
-    season: u32,
-    episodes: Value,
-    episode_count: u32,
-) {
+// Function to build a full series object with all sequels properly mapped
+// TODO: Change result into a better fitting object instead of Vec
+async fn build_full_series(id: i32) -> Result<Vec<Season>> {
     let mut series_full = Vec::new();
-    let mut current_season = 1;
+    let mut current_id = id;
+    let mut season_number = 1;
 
-    // Build a single season
-    let built_season = build_season(
-        name,
-        id.as_i64().unwrap() as i32,
-        current_season,
-        episodes.as_i64().unwrap() as i32,
-    );
+    loop {
+        let anime_data = jikan_fetch_anime_by_id(current_id).await.unwrap();
 
-    // Identify series parts
-    if season == current_season as u32 && episode_count > episodes.as_i64().unwrap() as u32 {
-        let related_id = jikan_fetch_related_sequel(id.as_i64().unwrap());
-        println!("Idk: {:?}", related_id.await);
+        let episode_count = anime_data["data"]["episodes"].as_i64().unwrap_or(0) as i32;
+        let title = anime_data["data"]["title"]
+            .as_str()
+            .unwrap_or("Unknown Title");
 
-        // Fetch sequel
-    }
+        let season_to_build = Season {
+            title: title.to_string(), // Ensure it owns the title data
+            id: current_id,
+            season: season_number,
+            episodes: episode_count,
+        };
+        series_full.push(season_to_build);
 
-    series_full.push(built_season);
-    println!("S_Array: {:?}", series_full.get(0));
-}
-
-async fn jikan_fetch_related_sequel(mal_id: i64) -> Result<i64> {
-    let url = format!("https://api.jikan.moe/v4/anime/{}/relations", mal_id);
-    let res = reqwest::get(&url).await?;
-
-    if res.status().is_success() {
-        let body = res.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body).expect("Failed to parse JSON");
-
-        if let Some(relations) = json["data"].as_array() {
-            for relation in relations {
-                //println!("Relation: {:?}", relation);
-
-                // TODO: Check for type to ensure its anime
-
-                if let Some("Sequel") = relation.get("relation").and_then(|r| r.as_str()) {
-                    if let Some(entries) = relation.get("entry").and_then(|e| e.as_array()) {
-                        if let Some(mal_id) = entries
-                            .get(0)
-                            .and_then(|entry| entry.get("mal_id"))
-                            .and_then(|id| id.as_i64())
-                        {
-                            println!("Entry_id: {:?}", mal_id);
-                            return Ok(mal_id);
-                        }
-                    }
-                }
+        // Fetch the next sequel ID, if any
+        match jikan_fetch_related_sequel(current_id as i64).await {
+            Ok(next_id) if next_id != 0 => {
+                season_number += 1;
+                current_id = next_id;
+            }
+            _ => {
+                println!("No further sequels found. Series mapping complete.");
+                break;
             }
         }
+
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    Ok(series_full)
+}
+
+async fn jikan_fetch_anime_by_id(id: i32) -> anyhow::Result<Value> {
+    let url = format!("https://api.jikan.moe/v4/anime/{}", id);
+    let res = reqwest::get(&url)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    if res.status().is_success() {
+        let body = res.text().await.map_err(|e| anyhow!(e.to_string()))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse JSON: {}", e))?;
+        Ok(json)
     } else {
-        println!("Failed to fetch anime details. Status: {}", res.status());
+        Err(anyhow!(
+            "Failed to fetch anime details. Status: {}",
+            res.status()
+        ))
+    }
+}
+
+async fn jikan_fetch_related_sequel(id: i64) -> Result<i32> {
+    let url = format!("https://api.jikan.moe/v4/anime/{}/relations", id);
+    let res = reqwest::get(&url).await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
+        //println!("Sequel data: {:?}", json.clone());
+        if let Some(sequel_id) = json["data"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|relation| relation["relation"] == "Sequel"))
+            .and_then(|relation| relation["entry"][0]["mal_id"].as_i64())
+        {
+            return Ok(sequel_id as i32);
+        }
     }
 
     Ok(0)
+}
+
+// I made this, but then realized that theres no point merging it like this, since we need the name that we delete by merging x)
+// So uhh, this is still fucked, but its too late rn for me to give a fuck about fixing it.
+fn merge_seasons(series: Vec<Season>) -> Vec<Season> {
+    let mut merged_series: Vec<Season> = Vec::new();
+    let mut season_map: std::collections::HashMap<String, Season> =
+        std::collections::HashMap::new();
+
+    for season in series {
+        if let Some(part_index) = season.title.find("Part") {
+            // Extract the base title (everything before "Part")
+            let base_title = season.title[..part_index].trim().to_string();
+
+            // Merge the part with the base title in the map
+            if let Some(existing_season) = season_map.get_mut(&base_title) {
+                existing_season.episodes += season.episodes;
+            } else {
+                season_map.insert(base_title, season);
+            }
+        } else {
+            season_map.insert(season.title.clone(), season);
+        }
+    }
+
+    merged_series.extend(season_map.into_values());
+
+    let mut current_season_num = 1;
+    for season in merged_series.iter_mut() {
+        if season.season > current_season_num {
+            current_season_num += 1;
+            season.season = current_season_num;
+        } else if season.season == current_season_num {
+            current_season_num += 1;
+        }
+    }
+
+    merged_series
 }
