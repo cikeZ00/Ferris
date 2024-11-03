@@ -7,18 +7,60 @@ use reqwest::{Client, Result};
 use select::document::Document;
 use select::predicate::{Attr, Name};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
-use tokio::time::{sleep, Duration};
+use std::sync::{Arc, Mutex};
+use tokio::time::{sleep, Duration, Instant};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Season {
     title: String, // Change to String to own the title data
-    id: i32,
     season: i32,
+    part: i32, // New field to track the part of the season
     episodes: i32,
 }
 
-// Jikan-related API endpoint: https://api.jikan.moe/v4/anime/{id}/relations
+// Caching
+#[derive(Clone)]
+struct CacheEntry {
+    value: Value,
+    expiry: Instant,
+}
+
+#[derive(Clone)]
+struct Cache {
+    data: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    ttl: Duration,
+}
+
+impl Cache {
+    fn new(ttl: Duration) -> Self {
+        Cache {
+            data: Arc::new(Mutex::new(HashMap::new())),
+            ttl,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<Value> {
+        let data = self.data.lock().unwrap();
+        if let Some(entry) = data.get(key) {
+            if entry.expiry > Instant::now() {
+                return Some(entry.value.clone());
+            }
+        }
+        None
+    }
+
+    fn set(&self, key: String, value: Value) {
+        let mut data = self.data.lock().unwrap();
+        let entry = CacheEntry {
+            value,
+            expiry: Instant::now() + self.ttl,
+        };
+        data.insert(key, entry);
+    }
+}
+
 pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
     let mut cookies = String::new();
 
@@ -40,6 +82,11 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
 
     let client = Client::new();
     let anime = jikan_fetch_anime(name, es).await?;
+
+    if anime.0 == "None" {
+        println!("Anime not found.");
+        return Ok(());
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(COOKIE, HeaderValue::from_str(&cookies).unwrap());
@@ -170,7 +217,10 @@ async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Resu
 }
 
 async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
-    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=3", title);
+    let cache = Cache::new(Duration::from_secs(3600)); // Cache TTL of 1 hour
+
+    // We want to fetch the ID of the 1st season of the show
+    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=1", title);
     let res = reqwest::get(&url).await?;
 
     if res.status().is_success() {
@@ -185,7 +235,7 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
             println!("Wanted Episode: {}", wanted_episode);
 
             // Here we build the Series object that includes all of the seasons of the show
-            let series = build_full_series(id.as_i64().unwrap() as i32).await?;
+            let series = build_full_series(id.as_i64().unwrap() as i32, &cache).await?;
 
             // Use merge_seasons to merge parts of the seasons
             let merged_series = merge_seasons(series);
@@ -203,30 +253,30 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
 
                 // Check if season is split into parts
                 if remaining_episodes > season.episodes as u32 {
-                    let next_season = merged_series
-                        .iter()
-                        .find(|next_season| next_season.season == season.season + 1);
+                    let next_part = merged_series.iter().find(|next_season| {
+                        next_season.season == season.season && next_season.part == season.part + 1
+                    });
 
-                    if let Some(next_season) = next_season {
+                    if let Some(next_part) = next_part {
                         // Decrease remaining_episodes by the current season's episodes
                         remaining_episodes -= season.episodes as u32;
-                        println!("Fetching next season: {:?}", next_season);
+                        println!("Fetching next part: {:?}", next_part);
                         println!("Remaining episodes to find: {}", remaining_episodes);
 
-                        if remaining_episodes <= next_season.episodes as u32 {
+                        if remaining_episodes <= next_part.episodes as u32 {
                             // Return the part 2's title and episode remainder
-                            println!("In {}: Episode {}", next_season.title, remaining_episodes);
+                            println!("In {}: Episode {}", next_part.title, remaining_episodes);
                             let episode_info: (String, u32) =
-                                (next_season.title.clone(), remaining_episodes);
+                                (next_part.title.clone(), remaining_episodes);
                             return Ok(episode_info);
                         } else {
                             println!(
-                                "Not enough episodes in next season. Total episodes: {}",
-                                next_season.episodes
+                                "Not enough episodes in next part. Total episodes: {}",
+                                next_part.episodes
                             );
                         }
                     } else {
-                        println!("No next season found after season {}", season.season);
+                        println!("No next part found after part {}", season.part);
                     }
                 } else {
                     // This season is not split into parts
@@ -250,13 +300,14 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
 
 // Function to build a full series object with all sequels properly mapped
 // TODO: Change result into a better fitting object instead of Vec
-async fn build_full_series(id: i32) -> Result<Vec<Season>> {
+async fn build_full_series(id: i32, cache: &Cache) -> Result<Vec<Season>> {
     let mut series_full = Vec::new();
     let mut current_id = id;
     let mut season_number = 1;
+    let mut part_number = 1;
 
     loop {
-        let anime_data = jikan_fetch_anime_by_id(current_id).await.unwrap();
+        let anime_data = jikan_fetch_anime_by_id(current_id, cache).await.unwrap();
 
         let episode_count = anime_data["data"]["episodes"].as_i64().unwrap_or(0) as i32;
         let title = anime_data["data"]["title"]
@@ -265,16 +316,30 @@ async fn build_full_series(id: i32) -> Result<Vec<Season>> {
 
         let season_to_build = Season {
             title: title.to_string(), // Ensure it owns the title data
-            id: current_id,
             season: season_number,
+            part: part_number,
             episodes: episode_count,
         };
         series_full.push(season_to_build);
 
         // Fetch the next sequel ID, if any
-        match jikan_fetch_related_sequel(current_id as i64).await {
+        match jikan_fetch_related_sequel(current_id as i64, cache).await {
             Ok(next_id) if next_id != 0 => {
-                season_number += 1;
+                // Check if the next season is a part of the current season
+                let next_anime_data = jikan_fetch_anime_by_id(next_id, cache).await.unwrap();
+                let next_title = next_anime_data["data"]["title"]
+                    .as_str()
+                    .unwrap_or("Unknown Title");
+
+                if next_title.contains("2nd Season") && title.contains("2nd Season") {
+                    part_number += 1;
+                } else if next_title.contains("3rd Season") && title.contains("3rd Season") {
+                    part_number += 1;
+                } else {
+                    season_number += 1;
+                    part_number = 1;
+                }
+
                 current_id = next_id;
             }
             _ => {
@@ -283,13 +348,19 @@ async fn build_full_series(id: i32) -> Result<Vec<Season>> {
             }
         }
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(1)).await;
     }
 
     Ok(series_full)
 }
 
-async fn jikan_fetch_anime_by_id(id: i32) -> anyhow::Result<Value> {
+async fn jikan_fetch_anime_by_id(id: i32, cache: &Cache) -> anyhow::Result<Value> {
+    sleep(Duration::from_secs(1)).await;
+    let cache_key = format!("anime_{}", id);
+    if let Some(cached_value) = cache.get(&cache_key) {
+        return Ok(cached_value);
+    }
+
     let url = format!("https://api.jikan.moe/v4/anime/{}", id);
     let res = reqwest::get(&url)
         .await
@@ -299,6 +370,7 @@ async fn jikan_fetch_anime_by_id(id: i32) -> anyhow::Result<Value> {
         let body = res.text().await.map_err(|e| anyhow!(e.to_string()))?;
         let json: serde_json::Value =
             serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse JSON: {}", e))?;
+        cache.set(cache_key, json.clone());
         Ok(json)
     } else {
         Err(anyhow!(
@@ -308,14 +380,25 @@ async fn jikan_fetch_anime_by_id(id: i32) -> anyhow::Result<Value> {
     }
 }
 
-async fn jikan_fetch_related_sequel(id: i64) -> Result<i32> {
+async fn jikan_fetch_related_sequel(id: i64, cache: &Cache) -> Result<i32> {
+    let cache_key = format!("relations_{}", id);
+    if let Some(cached_value) = cache.get(&cache_key) {
+        if let Some(sequel_id) = cached_value["data"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|relation| relation["relation"] == "Sequel"))
+            .and_then(|relation| relation["entry"][0]["mal_id"].as_i64())
+        {
+            return Ok(sequel_id as i32);
+        }
+    }
+
     let url = format!("https://api.jikan.moe/v4/anime/{}/relations", id);
     let res = reqwest::get(&url).await?;
 
     if res.status().is_success() {
         let body = res.text().await?;
         let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
-        //println!("Sequel data: {:?}", json.clone());
+        cache.set(cache_key, json.clone());
         if let Some(sequel_id) = json["data"]
             .as_array()
             .and_then(|arr| arr.iter().find(|relation| relation["relation"] == "Sequel"))
@@ -332,36 +415,20 @@ async fn jikan_fetch_related_sequel(id: i64) -> Result<i32> {
 // So uhh, this is still fucked, but its too late rn for me to give a fuck about fixing it.
 fn merge_seasons(series: Vec<Season>) -> Vec<Season> {
     let mut merged_series: Vec<Season> = Vec::new();
-    let mut season_map: std::collections::HashMap<String, Season> =
+    let mut season_map: std::collections::HashMap<(i32, i32), Season> =
         std::collections::HashMap::new();
 
     for season in series {
-        if let Some(part_index) = season.title.find("Part") {
-            // Extract the base title (everything before "Part")
-            let base_title = season.title[..part_index].trim().to_string();
-
-            // Merge the part with the base title in the map
-            if let Some(existing_season) = season_map.get_mut(&base_title) {
-                existing_season.episodes += season.episodes;
-            } else {
-                season_map.insert(base_title, season);
-            }
+        let key = (season.season, season.part);
+        if let Some(existing_season) = season_map.get_mut(&key) {
+            existing_season.episodes += season.episodes;
         } else {
-            season_map.insert(season.title.clone(), season);
+            season_map.insert(key, season.clone());
+            merged_series.push(season);
         }
     }
 
-    merged_series.extend(season_map.into_values());
-
-    let mut current_season_num = 1;
-    for season in merged_series.iter_mut() {
-        if season.season > current_season_num {
-            current_season_num += 1;
-            season.season = current_season_num;
-        } else if season.season == current_season_num {
-            current_season_num += 1;
-        }
-    }
-
+    // Sort the merged series by season number and part number to maintain order
+    merged_series.sort_by(|a, b| a.season.cmp(&b.season).then_with(|| a.part.cmp(&b.part)));
     merged_series
 }
