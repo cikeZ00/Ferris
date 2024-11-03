@@ -13,7 +13,7 @@ async fn main() {
         std::process::exit(0);
     }
 
-    errai("Re: ZERO, Starting Life in Another World", "2x18", "")
+    errai("Re: ZERO, Starting Life in Another World", "1x5", "")
         .await
         .unwrap();
 }

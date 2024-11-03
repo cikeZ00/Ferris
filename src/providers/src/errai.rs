@@ -14,9 +14,9 @@ use tokio::time::{sleep, Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct Season {
-    title: String, // Change to String to own the title data
+    title: String,
     season: i32,
-    part: i32, // New field to track the part of the season
+    part: i32,
     episodes: i32,
 }
 
@@ -61,7 +61,7 @@ impl Cache {
     }
 }
 
-pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
+pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
     let mut cookies = String::new();
 
     if let Ok(cookie_data) = fs::read_to_string("data/config.ini") {
@@ -142,14 +142,22 @@ pub async fn errai(name: &str, es: &str, _language: &str) -> Result<()> {
                 }
             };
 
-            // Fetch subtitles
-            let _subtitle = match fetch_subtitle(&client, &sub_dir, &headers).await {
-                Ok(sub) => sub,
-                Err(e) => {
-                    println!("Failed to fetch subtitles: {}", e);
-                    return Ok(());
-                }
-            };
+            if let Some((_, wanted_episode)) = extract_season_episode(es) {
+                // Fetch subtitles
+                let _subtitle =
+                    match fetch_subtitle(&client, &sub_dir, &headers, wanted_episode, &language)
+                        .await
+                    {
+                        Ok(sub) => sub,
+                        Err(e) => {
+                            println!("Failed to fetch subtitles: {}", e);
+                            return Ok(());
+                        }
+                    };
+            } else {
+                println!("Failed to extract season and episode from input.");
+                return Ok(());
+            }
         }
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
@@ -193,7 +201,13 @@ async fn fetch_sub_url(client: &Client, url: &str, headers: &HeaderMap) -> Resul
     Ok(String::new())
 }
 
-async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Result<String> {
+async fn fetch_subtitle(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    episode: u32,
+    language: &str,
+) -> Result<String> {
     let res = client.get(url).headers(headers.clone()).send().await?;
 
     if res.status().is_success() {
@@ -204,7 +218,9 @@ async fn fetch_subtitle(client: &Client, url: &str, headers: &HeaderMap) -> Resu
             for row in dirlist.find(Name("li")) {
                 let link = row.attr("data-href").unwrap_or("#").to_string();
                 let name = row.attr("data-name").unwrap_or("#").to_string();
-                println!("Name: {} | Link: {}", name, link);
+                if name != ".." && !link.ends_with(".7z") {
+                    println!("Name: {} | Link: {}", name, link);
+                }
             }
         } else {
             println!("Subtitles not found on the page.");
@@ -239,8 +255,6 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
 
             // Use merge_seasons to merge parts of the seasons
             let merged_series = merge_seasons(series);
-
-            println!("Full series: {:?}", merged_series);
 
             // Find the desired season in the merged series
             if let Some(season) = merged_series
@@ -411,8 +425,6 @@ async fn jikan_fetch_related_sequel(id: i64, cache: &Cache) -> Result<i32> {
     Ok(0)
 }
 
-// I made this, but then realized that theres no point merging it like this, since we need the name that we delete by merging x)
-// So uhh, this is still fucked, but its too late rn for me to give a fuck about fixing it.
 fn merge_seasons(series: Vec<Season>) -> Vec<Season> {
     let mut merged_series: Vec<Season> = Vec::new();
     let mut season_map: std::collections::HashMap<(i32, i32), Season> =
