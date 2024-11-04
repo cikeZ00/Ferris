@@ -142,22 +142,16 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
                 }
             };
 
-            if let Some((_, wanted_episode)) = extract_season_episode(es) {
-                // Fetch subtitles
-                let _subtitle =
-                    match fetch_subtitle(&client, &sub_dir, &headers, wanted_episode, &language)
-                        .await
-                    {
-                        Ok(sub) => sub,
-                        Err(e) => {
-                            println!("Failed to fetch subtitles: {}", e);
-                            return Ok(());
-                        }
-                    };
-            } else {
-                println!("Failed to extract season and episode from input.");
-                return Ok(());
-            }
+            // Fetch subtitles
+            println!("Okay so this is the episode we want {}", anime.1);
+            let _subtitle =
+                match fetch_subtitle(&client, &sub_dir, &headers, anime.1, &language).await {
+                    Ok(sub) => sub,
+                    Err(e) => {
+                        println!("Failed to fetch subtitles: {}", e);
+                        return Ok(());
+                    }
+                };
         }
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
@@ -213,13 +207,51 @@ async fn fetch_subtitle(
     if res.status().is_success() {
         let body = res.text().await?;
         let document = Document::from(body.as_str());
+        let base_url = "https://www.erai-raws.info/subs/";
 
         if let Some(dirlist) = document.find(Attr("id", "directory-listing")).next() {
             for row in dirlist.find(Name("li")) {
-                let link = row.attr("data-href").unwrap_or("#").to_string();
+                let link = format!(
+                    "{}{}",
+                    base_url,
+                    row.attr("data-href").unwrap_or("#").to_string()
+                );
                 let name = row.attr("data-name").unwrap_or("#").to_string();
+
                 if name != ".." && !link.ends_with(".7z") {
-                    println!("Name: {} | Link: {}", name, link);
+                    // Check for full language name
+                    if name.eq_ignore_ascii_case(language) {
+                        println!("We goin straight!");
+                        return fetch_subtitle_from_language_dir(
+                            client, &link, headers, episode, language,
+                        )
+                        .await;
+                    }
+
+                    // Check for "0 ~ X" structure
+                    if let Some(caps) = Regex::new(r"01 ~ (\d+)").unwrap().captures(&name) {
+                        let max_episode = caps[1].parse::<u32>().unwrap_or(0);
+                        println!("We goin sideways!");
+                        if episode <= max_episode {
+                            return fetch_subtitle_from_range_dir(
+                                client, &link, headers, episode, language,
+                            )
+                            .await;
+                        }
+                    }
+
+                    // Check for list of episod e directories
+                    // TODO: FIX THIS
+                    if Regex::new(r"^\d+").unwrap().is_match(&name) {
+                        println!("We goin down!");
+
+                        if name.contains(&format!("{:02}", episode)) {
+                            return fetch_subtitle_from_episode_dirs(
+                                client, &link, headers, episode, language,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
         } else {
@@ -227,6 +259,163 @@ async fn fetch_subtitle(
         }
     } else {
         println!("Failed to fetch subtitles page. Status: {}", res.status());
+    }
+
+    Ok(String::new())
+}
+
+async fn fetch_subtitle_from_language_dir(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    episode: u32,
+    language: &str,
+) -> Result<String> {
+    let res = client.get(url).headers(headers.clone()).send().await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let document = Document::from(body.as_str());
+
+        let language_full = match language.to_lowercase().as_str() {
+            "en" => "English",
+            "jp" => "Japanese",
+            "es" => "Spanish",
+            "fr" => "French",
+            "de" => "German",
+            "it" => "Italian",
+            "pt" => "Portuguese",
+            "ru" => "Russian",
+            "zh" => "Chinese",
+            _ => language,
+        };
+
+        if let Some(dirlist) = document.find(Attr("id", "directory-listing")).next() {
+            for row in dirlist.find(Name("li")) {
+                let link = row.attr("data-href").unwrap_or("#").to_string();
+                let name = row.attr("data-name").unwrap_or("#").to_string();
+
+                if name != ".." && !link.ends_with(".7z") {
+                    println!("Name: {}", name);
+                    // If the name contains the episode number and the language
+                    if name.contains(&format!("{:02}", episode)) || name.contains(language_full) {
+                        println!("Found: {}", link);
+                        return Ok(link);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(String::new())
+}
+
+async fn fetch_subtitle_from_range_dir(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    episode: u32,
+    language: &str,
+) -> Result<String> {
+    let res = client.get(url).headers(headers.clone()).send().await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let document = Document::from(body.as_str());
+
+        let language_full = match language.to_lowercase().as_str() {
+            "en" => "English",
+            "jp" => "Japanese",
+            "es" => "Spanish",
+            "fr" => "French",
+            "de" => "German",
+            "it" => "Italian",
+            "pt" => "Portuguese",
+            "ru" => "Russian",
+            "zh" => "Chinese",
+            _ => language,
+        };
+
+        if let Some(dirlist) = document.find(Attr("id", "directory-listing")).next() {
+            for row in dirlist.find(Name("li")) {
+                let link = row.attr("data-href").unwrap_or("#").to_string();
+                let name = row.attr("data-name").unwrap_or("#").to_string();
+
+                if name != ".." && !link.ends_with(".7z") {
+                    if name.contains(&format!("{:02}", episode)) || name.contains(&language_full) {
+                        // We want to enter the language directory
+                        return fetch_subtitle_from_language_dir(
+                            client,
+                            &format!("https://www.erai-raws.info/subs/{}", link),
+                            headers,
+                            episode,
+                            language,
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(String::new())
+}
+
+async fn fetch_subtitle_from_episode_dirs(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    episode: u32,
+    language: &str,
+) -> Result<String> {
+    let res = client.get(url).headers(headers.clone()).send().await?;
+
+    if res.status().is_success() {
+        let body = res.text().await?;
+        let document = Document::from(body.as_str());
+
+        if let Some(dirlist) = document.find(Attr("id", "directory-listing")).next() {
+            for row in dirlist.find(Name("li")) {
+                let link = row.attr("data-href").unwrap_or("#").to_string();
+                let name = row.attr("data-name").unwrap_or("#").to_string();
+
+                if name != ".." && !link.ends_with(".7z") {
+                    // The language variable should be converted from its shortcode to its full name
+                    let language_full = match language.to_lowercase().as_str() {
+                        "en" => "English",
+                        "jp" => "Japanese",
+                        "es" => "Spanish",
+                        "fr" => "French",
+                        "de" => "German",
+                        "it" => "Italian",
+                        "pt" => "Portuguese",
+                        "ru" => "Russian",
+                        "zh" => "Chinese",
+                        _ => language,
+                    };
+
+                    if name.eq_ignore_ascii_case(language)
+                        || name.eq_ignore_ascii_case(language_full)
+                    {
+                        println!("Redirecting to language directory.");
+                        return fetch_subtitle_from_language_dir(
+                            client,
+                            &format!("https://www.erai-raws.info/subs/{}", link),
+                            headers,
+                            episode,
+                            language,
+                        )
+                        .await;
+                    }
+                    println!("{}", name);
+
+                    if name.starts_with(&format!("{:02}", episode)) {
+                        println!("Name: {} | Link: {}", name, link);
+                        return Ok(link);
+                    }
+                }
+            }
+        }
     }
 
     Ok(String::new())
