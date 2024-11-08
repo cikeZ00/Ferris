@@ -424,15 +424,26 @@ async fn fetch_subtitle_from_episode_dirs(
 async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
     let cache = Cache::new(Duration::from_secs(3600)); // Cache TTL of 1 hour
 
-    // We want to fetch the ID of the 1st season of the show
-    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=1", title);
+    let url = format!("https://api.jikan.moe/v4/anime?q={}", title);
     let res = reqwest::get(&url).await?;
 
     if res.status().is_success() {
         let body = res.text().await?;
         let json: Value = serde_json::from_str(&body).expect("Failed to parse JSON");
 
-        let id = json["data"][0]["mal_id"].clone();
+        // Sometimes if the title is short, the search results are not accurate (ie. "One Piece" has the movie as the first result)
+        // We need some way to filter out the results to get the TV show
+
+        let mut id = json["data"][0]["mal_id"].clone();
+        println!("Fetched ID: {}", id);
+
+        for result in json["data"].as_array().unwrap() {
+            if result["type"].to_string() == "\"TV\"" || result["type"].to_string() == "\"ONA\"" {
+                id = result["mal_id"].clone();
+                break;
+            }
+        }
+
         println!("Fetched ID: {}", id);
 
         if let Some((wanted_season, wanted_episode)) = extract_season_episode(es) {
@@ -512,7 +523,15 @@ async fn build_full_series(id: i32, cache: &Cache) -> Result<Vec<Season>> {
     loop {
         let anime_data = jikan_fetch_anime_by_id(current_id, cache).await.unwrap();
 
-        let episode_count = anime_data["data"]["episodes"].as_i64().unwrap_or(0) as i32;
+        let mut episode_count = anime_data["data"]["episodes"].as_i64().unwrap_or(0) as i32;
+        // If episode count is 0, it means the show is still airing
+        // We need to fetch the last aired episode to get the total episode count
+
+        if episode_count == 0 {
+            let airing_data = jikan_fetch_airing_data(current_id, cache).await.unwrap();
+            episode_count = airing_data["data"]["episodes"].as_i64().unwrap_or(0) as i32;
+        }
+
         let title = anime_data["data"]["title"]
             .as_str()
             .unwrap_or("Unknown Title");
@@ -555,6 +574,33 @@ async fn build_full_series(id: i32, cache: &Cache) -> Result<Vec<Season>> {
     }
 
     Ok(series_full)
+}
+
+async fn jikan_fetch_airing_data(id: i32, cache: &Cache) -> anyhow::Result<Value> {
+    sleep(Duration::from_secs(1)).await;
+    let cache_key = format!("airing_{}", id);
+    if let Some(cached_value) = cache.get(&cache_key) {
+        return Ok(cached_value);
+    }
+
+    let url = format!("https://api.jikan.moe/v4/anime/{}/episodes", id);
+    let res = reqwest::get(&url)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
+
+    if res.status().is_success() {
+        let body = res.text().await.map_err(|e| anyhow!(e.to_string()))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| anyhow!(e.to_string()))?;
+
+        cache.set(cache_key, json.clone());
+        return Ok(json);
+    }
+
+    Err(anyhow!(
+        "Failed to fetch airing data. Status: {}",
+        res.status()
+    ))
 }
 
 async fn jikan_fetch_anime_by_id(id: i32, cache: &Cache) -> anyhow::Result<Value> {
