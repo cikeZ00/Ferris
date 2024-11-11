@@ -129,9 +129,10 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
             }
         }
 
+        // THe title can contain the english name appended to it, so we need to check if it contains the anime name in the string (doesnt have to be exact)
         let link = title_pages
             .iter()
-            .find(|(title, _)| title.to_string() == anime.0.clone());
+            .find(|(title, _)| title.to_lowercase().contains(&anime.0.to_lowercase()));
 
         if let Some((_, link)) = link {
             let sub_dir = match fetch_sub_url(&client, link, &headers).await {
