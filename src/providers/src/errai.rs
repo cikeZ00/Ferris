@@ -1,3 +1,4 @@
+// TODO: MODULARIZE THE FUCK OUT THIS, PLS (Thanks future me <3)
 use anyhow::anyhow;
 use regex::Regex;
 use reqwest::header::{
@@ -9,6 +10,7 @@ use select::predicate::{Attr, Name};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration, Instant};
 
@@ -20,7 +22,7 @@ struct Season {
     episodes: i32,
 }
 
-// Caching
+// Caching (Not fully functional, plan is to build a local cache of fetched shows to lower API load)
 #[derive(Clone)]
 struct CacheEntry {
     value: Value,
@@ -129,7 +131,6 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
             }
         }
 
-        // THe title can contain the english name appended to it, so we need to check if it contains the anime name in the string (doesnt have to be exact)
         let link = title_pages
             .iter()
             .find(|(title, _)| title.to_lowercase().contains(&anime.0.to_lowercase()));
@@ -143,9 +144,8 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
                 }
             };
 
-            // Fetch subtitles
-            println!("Okay so this is the episode we want {}", anime.1);
-            let _subtitle =
+            // TODO: Return filename alongside sub url
+            let subtitle =
                 match fetch_subtitle(&client, &sub_dir, &headers, anime.1, &language).await {
                     Ok(sub) => sub,
                     Err(e) => {
@@ -153,6 +153,19 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<()> {
                         return Ok(());
                     }
                 };
+
+            // Resolve file extension from the subtitle URL
+            // TODO: Change the fetch sub function to return the filename alongside the subtitle url
+            // URL example: https://www.erai-raws.info/subs/Sub/2024/Fall/Re%20Zero/06/%5BErai-raws%5D%20Re%20Zero%20kara%20Hajimeru%20Isekai%20Seikatsu%203rd%20Season%20-%2006%20%5B1080p%5D%5BMultiple%20Subtitle%5D%5B48EBFCC4%5D.8.fre.ass
+
+            let sub_extension = subtitle.split('.').last().unwrap_or("ass");
+            save_sub_from_url(
+                &client,
+                &headers,
+                &subtitle,
+                &format!("subtitle.{}", sub_extension),
+            )
+            .await;
         }
     } else {
         println!("Failed to fetch search results. Status: {}", res.status());
@@ -196,6 +209,7 @@ async fn fetch_sub_url(client: &Client, url: &str, headers: &HeaderMap) -> Resul
     Ok(String::new())
 }
 
+// We want to return the filename alongside the subtitle url
 async fn fetch_subtitle(
     client: &Client,
     url: &str,
@@ -222,7 +236,7 @@ async fn fetch_subtitle(
                 if name != ".." && !link.ends_with(".7z") {
                     // Check for full language name
                     if name.eq_ignore_ascii_case(language) {
-                        println!("We goin straight!");
+                        println!("Directory is a full language name.");
                         return fetch_subtitle_from_language_dir(
                             client, &link, headers, episode, language,
                         )
@@ -232,7 +246,7 @@ async fn fetch_subtitle(
                     // Check for "0 ~ X" structure
                     if let Some(caps) = Regex::new(r"01 ~ (\d+)").unwrap().captures(&name) {
                         let max_episode = caps[1].parse::<u32>().unwrap_or(0);
-                        println!("We goin sideways!");
+                        println!("Directory is a range of episodes.");
                         if episode <= max_episode {
                             return fetch_subtitle_from_range_dir(
                                 client, &link, headers, episode, language,
@@ -244,7 +258,7 @@ async fn fetch_subtitle(
                     // Check for list of episod e directories
                     // TODO: FIX THIS
                     if Regex::new(r"^\d+").unwrap().is_match(&name) {
-                        println!("We goin down!");
+                        println!("Directory is a list of episodes.");
 
                         if name.contains(&format!("{:02}", episode)) {
                             return fetch_subtitle_from_episode_dirs(
@@ -381,7 +395,6 @@ async fn fetch_subtitle_from_episode_dirs(
                 let name = row.attr("data-name").unwrap_or("#").to_string();
 
                 if name != ".." && !link.ends_with(".7z") {
-                    // The language variable should be converted from its shortcode to its full name
                     let language_full = match language.to_lowercase().as_str() {
                         "en" => "English",
                         "jp" => "Japanese",
@@ -395,6 +408,7 @@ async fn fetch_subtitle_from_episode_dirs(
                         _ => language,
                     };
 
+                    // Full language name
                     if name.eq_ignore_ascii_case(language)
                         || name.eq_ignore_ascii_case(language_full)
                     {
@@ -408,8 +422,14 @@ async fn fetch_subtitle_from_episode_dirs(
                         )
                         .await;
                     }
-                    println!("{}", name);
 
+                    // Language short code
+                    if name.contains(language) {
+                        println!("Found: {}", name);
+                        return Ok(link);
+                    }
+
+                    // Ep number
                     if name.starts_with(&format!("{:02}", episode)) {
                         println!("Name: {} | Link: {}", name, link);
                         return Ok(link);
@@ -445,11 +465,11 @@ async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
             }
         }
 
-        println!("Fetched ID: {}", id);
-
         if let Some((wanted_season, wanted_episode)) = extract_season_episode(es) {
-            println!("Wanted Season: {}", wanted_season);
-            println!("Wanted Episode: {}", wanted_episode);
+            println!(
+                "Wanted Season: {} | Wanted Episode {}",
+                wanted_season, wanted_episode
+            );
 
             // Here we build the Series object that includes all of the seasons of the show
             let series = build_full_series(id.as_i64().unwrap() as i32, &cache).await?;
@@ -679,4 +699,56 @@ fn merge_seasons(series: Vec<Season>) -> Vec<Season> {
     // Sort the merged series by season number and part number to maintain order
     merged_series.sort_by(|a, b| a.season.cmp(&b.season).then_with(|| a.part.cmp(&b.part)));
     merged_series
+}
+
+async fn save_sub_from_url(client: &Client, headers: &HeaderMap, url: &str, name: &str) {
+    let full_url = format!("https://www.erai-raws.info/subs/{}", url);
+
+    if !std::path::Path::new("temp").exists() {
+        std::fs::create_dir("temp").unwrap();
+    }
+    let mut file = std::fs::File::create(format!("temp/{}", name)).unwrap();
+
+    let mut download_headers = headers.clone();
+    download_headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(
+            "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+        ),
+    );
+    download_headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    );
+    download_headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
+    download_headers.insert(
+        "Accept-Encoding",
+        HeaderValue::from_static("gzip, deflate, br, zstd"),
+    );
+    download_headers.insert("DNT", HeaderValue::from_static("1"));
+    download_headers.insert("Sec-GPC", HeaderValue::from_static("1"));
+    download_headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+    download_headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+    download_headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
+    download_headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
+    download_headers.insert("Sec-Fetch-Site", HeaderValue::from_static("same-origin"));
+    download_headers.insert("Sec-Fetch-User", HeaderValue::from_static("?1"));
+    download_headers.insert("Priority", HeaderValue::from_static("u=0, i"));
+    download_headers.insert("TE", HeaderValue::from_static("trailers"));
+
+    let res = client
+        .get(&full_url)
+        .headers(download_headers)
+        .send()
+        .await
+        .unwrap();
+
+    if res.status().is_success() {
+        let mut content = Cursor::new(res.bytes().await.unwrap());
+        println!("Downloaded subtitle: {}", name);
+
+        std::io::copy(&mut content, &mut file).unwrap();
+    } else {
+        println!("Failed to download subtitle. Status: {}", res.status());
+    }
 }
