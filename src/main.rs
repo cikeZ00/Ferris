@@ -13,7 +13,19 @@ async fn main() {
         std::process::exit(0);
     }
 
-    errai("Re: ZERO, Starting Life in Another World", "3x3", "fr")
+    let result_path = errai("Re: ZERO, Starting Life in Another World", "3x3", "fr")
         .await
         .unwrap();
+
+    if result_path == "" {
+        println!("Failed to download the file.");
+        std::process::exit(0);
+    }
+
+    println!("Downloaded to: {}", result_path);
+
+    // Then we handle uploading the file to bazarr here
+
+    //Then we delete the file after we're done with it
+    fs::remove_file(result_path).expect("Failed to delete file.");
 }
