@@ -1,3 +1,4 @@
+use bazarr::bazarr::bazarr;
 use providers::errai::errai;
 use std::fs;
 
@@ -25,6 +26,7 @@ async fn main() {
     println!("Downloaded to: {}", result_path);
 
     // Then we handle uploading the file to bazarr here
+    bazarr().await;
 
     //Then we delete the file after we're done with it
     fs::remove_file(result_path).expect("Failed to delete file.");
