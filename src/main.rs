@@ -25,15 +25,7 @@ async fn main() {
     println!("Downloaded to: {}", result_path);
 
     // Then we handle uploading the file to bazarr here
-    upload(
-        "Re: ZERO, Starting Life in Another World",
-        "3x3",
-        "fr",
-        false,
-        false,
-        result_path.clone(),
-    )
-    .await;
+    upload("54", "2443", "fr", false, false, result_path.clone()).await;
 
     //Then we delete the file after we're done with it
     fs::remove_file(result_path).expect("Failed to delete file.");

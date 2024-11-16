@@ -5,6 +5,7 @@ use select::document::Document;
 use select::predicate::{Attr, Name};
 use std::io::Cursor;
 
+// TODO: Complete language short codes, configurable search patterns for specific series
 pub async fn fetch_sub_url(client: &Client, url: &str, headers: &HeaderMap) -> Result<String> {
     let res = client.get(url).headers(headers.clone()).send().await?;
 
