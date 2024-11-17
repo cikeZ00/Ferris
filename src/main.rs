@@ -13,9 +13,7 @@ async fn main() {
         std::process::exit(0);
     }
 
-    let result_path = errai("Re: ZERO, Starting Life in Another World", "3x3", "fr")
-        .await
-        .unwrap();
+    let result_path = errai("Dr. Stone", "3x13", "fr").await.unwrap();
 
     if result_path == "" {
         println!("Failed to download the file.");
@@ -25,7 +23,7 @@ async fn main() {
     println!("Downloaded to: {}", result_path);
 
     // Then we handle uploading the file to bazarr here
-    upload("54", "2443", "fr", false, false, result_path.clone()).await;
+    upload("1", "49", "fr", false, false, result_path.clone()).await;
 
     //Then we delete the file after we're done with it
     fs::remove_file(result_path).expect("Failed to delete file.");
