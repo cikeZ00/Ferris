@@ -102,60 +102,45 @@ pub async fn upload(
 //     ],
 //     "seriesType": "anime"
 //   },
-pub async fn fetch_wanted_shows() {
-    println!("Fetching wanted from Bazarr...");
+pub async fn fetch_wanted_shows(
+) -> Result<Vec<HashMap<String, serde_json::Value>>, Box<dyn std::error::Error>> {
     let (base_url, token) = get_url();
     let url = format!("{}/api/episodes/wanted?start=0&length=-1", base_url);
     let client = Client::new();
+
     let response = client
         .get(&url)
         .header(USER_AGENT, "Ferris")
         .header("X-API-KEY", token)
         .send()
-        .await
-        .expect("Failed to fetch wanted shows");
+        .await?;
 
     if response.status().is_success() {
-        let json: serde_json::Value = response.json().await.expect("Failed to parse JSON");
-        let data = json["data"].as_array().expect("Failed to parse data");
-        for show in data {
-            let _series_title = show["seriesTitle"]
-                .as_str()
-                .expect("Failed to parse seriesTitle");
-            let _episode_number = show["episode_number"]
-                .as_str()
-                .expect("Failed to parse episode_number");
-            let _sonarr_series_id = show["sonarrSeriesId"]
-                .as_u64()
-                .expect("Failed to parse sonarrSeriesId");
-            let _sonarr_episode_id = show["sonarrEpisodeId"]
-                .as_u64()
-                .expect("Failed to parse sonarrEpisodeId");
-            let _missing_subtitles = show["missing_subtitles"]
-                .as_array()
-                .expect("Failed to parse missing_subtitles");
+        let json: serde_json::Value = response.json().await?;
+        let data = json["data"]
+            .as_array()
+            .ok_or("Expected data to be an array")?;
 
-            // println!(
-            //     "Series: {}, Episode: {}, Sonarr Series ID: {}, Sonarr Episode ID: {}",
-            //     series_title, episode_number, sonarr_series_id, sonarr_episode_id
-            // );
-
-            // for subtitle in missing_subtitles {
-            //     let name = subtitle["name"].as_str().expect("Failed to parse name");
-            //     let code2 = subtitle["code2"].as_str().expect("Failed to parse code2");
-            //     let code3 = subtitle["code3"].as_str().expect("Failed to parse code3");
-            //     let forced = subtitle["forced"]
-            //         .as_bool()
-            //         .expect("Failed to parse forced");
-            //     let hi = subtitle["hi"].as_bool().expect("Failed to parse hi");
-
-            //     println!(
-            //         "  Name: {}, Code2: {}, Code3: {}, Forced: {}, HI: {}",
-            //         name, code2, code3, forced, hi
-            //     );
-            //}
+        let mut result = Vec::new();
+        for item in data {
+            let mut show_info = HashMap::new();
+            show_info.insert("seriesTitle".to_string(), item["seriesTitle"].clone());
+            show_info.insert("episode_number".to_string(), item["episode_number"].clone());
+            show_info.insert("seriesType".to_string(), item["seriesType"].clone());
+            show_info.insert("sonarrSeriesId".to_string(), item["sonarrSeriesId"].clone());
+            show_info.insert(
+                "sonarrEpisodeId".to_string(),
+                item["sonarrEpisodeId"].clone(),
+            );
+            show_info.insert(
+                "missing_subtitles".to_string(),
+                item["missing_subtitles"].clone(),
+            );
+            result.push(show_info);
         }
+
+        Ok(result)
     } else {
-        println!("Failed to fetch wanted shows: {:?}", response.text().await);
+        Err(format!("Failed to fetch wanted shows: {:?}", response.text().await?).into())
     }
 }

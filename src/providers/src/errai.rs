@@ -102,6 +102,11 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<String> {
                     }
                 };
 
+            // Temp case for when no subtitles are found
+            if subtitle == "" {
+                return Ok("".to_string());
+            }
+
             let sub_extension = subtitle.split('.').last().unwrap_or("ass");
             return save_sub_from_url(
                 &client,

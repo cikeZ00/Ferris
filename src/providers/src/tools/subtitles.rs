@@ -172,9 +172,11 @@ pub async fn fetch_subtitle_from_range_dir(
                 let link = row.attr("data-href").unwrap_or("#").to_string();
                 let name = row.attr("data-name").unwrap_or("#").to_string();
 
+                // Check if language is in the name
+
                 if name != ".." && !link.ends_with(".7z") {
-                    if name.contains(&format!(" {:02} ", episode)) || name.contains(&language_full)
-                    {
+                    if name.contains(&format!(" {:02} ", episode)) || name.contains(language_full) {
+                        println!("Found: {}", link);
                         return fetch_subtitle_from_language_dir(
                             client,
                             &format!("https://www.erai-raws.info/subs/{}", link),
