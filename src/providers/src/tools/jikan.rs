@@ -74,6 +74,10 @@ pub async fn jikan_fetch_anime(title: &str, es: &str) -> Result<(String, u32)> {
                         }
                     } else {
                         println!("No next part found after part {}", season.part);
+                        // Unsure this is needed
+                        let episode_info: (String, u32) = (season.title.clone(), season.episodes as u32);
+                        println!("In {}: Episode {}", season.title, season.episodes);
+                        return Ok(episode_info);
                     }
                 } else {
                     let episode_info: (String, u32) = (season.title.clone(), remaining_episodes);
@@ -232,7 +236,10 @@ pub async fn build_full_series(id: i32, cache: &Cache) -> Result<Vec<Season>> {
             part: part_number,
             episodes: episode_count,
         };
-        series_full.push(season_to_build);
+
+        if season_to_build.episodes > 3 {
+            series_full.push(season_to_build);
+        }
 
         match jikan_fetch_related_sequel(current_id as i64, cache).await {
             Ok(next_id) if next_id != 0 => {
@@ -246,8 +253,12 @@ pub async fn build_full_series(id: i32, cache: &Cache) -> Result<Vec<Season>> {
                 } else if next_title.contains("3rd Season") && title.contains("3rd Season") {
                     part_number += 1;
                 } else {
-                    season_number += 1;
-                    part_number = 1;
+                    if next_anime_data["data"]["episodes"].as_i64() > Some(3) {
+                        season_number += 1;
+                        part_number = 1;
+                    } else {
+                        println!("Skipping season with less than 3 episodes: {}", next_title);
+                    }
                 }
 
                 current_id = next_id;
