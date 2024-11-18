@@ -78,9 +78,11 @@ pub async fn errai(name: &str, es: &str, language: &str) -> Result<String> {
             }
         }
 
+        // We need to look out for parts in titles, if we want part 1 but the title doesnt contain part one
+        // it might accidentally fetch part 2 instead, some titles also have english names appended to them
         let link = title_pages
             .iter()
-            .find(|(title, _)| title.to_lowercase().contains(&anime.0.to_lowercase()));
+            .find(|(title, _)| title.to_lowercase() == anime.0.to_lowercase());
 
         if let Some((_, link)) = link {
             let sub_dir = match fetch_sub_url(&client, link, &headers).await {

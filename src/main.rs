@@ -26,5 +26,5 @@ async fn main() {
     upload("1", "46", "fr", false, false, result_path.clone()).await;
 
     //Then we delete the file after we're done with it
-    //fs::remove_file(result_path).expect("Failed to delete file.");
+    fs::remove_file(result_path).expect("Failed to delete file.");
 }
