@@ -119,16 +119,16 @@ pub async fn fetch_wanted_shows() {
         let json: serde_json::Value = response.json().await.expect("Failed to parse JSON");
         let data = json["data"].as_array().expect("Failed to parse data");
         for show in data {
-            let series_title = show["seriesTitle"]
+            let _series_title = show["seriesTitle"]
                 .as_str()
                 .expect("Failed to parse seriesTitle");
-            let episode_number = show["episode_number"]
+            let _episode_number = show["episode_number"]
                 .as_str()
                 .expect("Failed to parse episode_number");
-            let sonarr_series_id = show["sonarrSeriesId"]
+            let _sonarr_series_id = show["sonarrSeriesId"]
                 .as_u64()
                 .expect("Failed to parse sonarrSeriesId");
-            let sonarr_episode_id = show["sonarrEpisodeId"]
+            let _sonarr_episode_id = show["sonarrEpisodeId"]
                 .as_u64()
                 .expect("Failed to parse sonarrEpisodeId");
             let _missing_subtitles = show["missing_subtitles"]

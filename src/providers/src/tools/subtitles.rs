@@ -129,7 +129,7 @@ pub async fn fetch_subtitle_from_language_dir(
 
                 if name != ".." && !link.ends_with(".7z") {
                     println!("Name: {}", name);
-                    if name.contains(&format!("{:02}", episode)) || name.contains(language_full) {
+                    if name.contains(&format!(" {:02} ", episode)) || name.contains(language_full) {
                         println!("Found: {}", link);
                         return Ok(link);
                     }
@@ -173,7 +173,8 @@ pub async fn fetch_subtitle_from_range_dir(
                 let name = row.attr("data-name").unwrap_or("#").to_string();
 
                 if name != ".." && !link.ends_with(".7z") {
-                    if name.contains(&format!("{:02}", episode)) || name.contains(&language_full) {
+                    if name.contains(&format!(" {:02} ", episode)) || name.contains(&language_full)
+                    {
                         return fetch_subtitle_from_language_dir(
                             client,
                             &format!("https://www.erai-raws.info/subs/{}", link),
@@ -242,7 +243,7 @@ pub async fn fetch_subtitle_from_episode_dirs(
                         return Ok(link);
                     }
 
-                    if name.starts_with(&format!("{:02}", episode)) {
+                    if name.starts_with(&format!(" {:02} ", episode)) {
                         println!("Name: {} | Link: {}", name, link);
                         return Ok(link);
                     }
